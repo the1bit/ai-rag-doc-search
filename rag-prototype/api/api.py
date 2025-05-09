@@ -1,19 +1,56 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from langchain.chat_models import ChatOllama
+from langchain_community.chat_models import ChatOllama
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.runnable import Runnable
 from langchain.schema.output_parser import StrOutputParser
-from langchain_community.vectorstores import Weaviate
-from langchain.embeddings import OllamaEmbeddings
-import weaviate
+from langchain_community.vectorstores import Qdrant
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_core.documents import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import VectorParams, Distance
+import redis.asyncio as redis
 import os
+import json
+import logging
+from pathlib import Path
+from typing import List, Dict
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,  # vagy DEBUG, ha részletesebb logolás kell
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+logger = logging.getLogger(__name__)
+
+# Redis utils
+async def get_conversation(session_id: str) -> List[Dict[str, str]]:
+    data = await redis_client.get(session_id)
+    if data:
+        return json.loads(data)
+    return []
+
+async def save_conversation(session_id: str, history: List[Dict[str, str]]):
+    await redis_client.set(session_id, json.dumps(history))
+
+
+
 
 app = FastAPI()
 
-# Load environment variables
+# Environment variables
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-WEAVIATE_URL = os.getenv("WEAVIATE_URL", "http://localhost:8080")
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+INIT_PROMPT_TEMPLATE = os.getenv("INIT_PROMPT_TEMPLATE", "./prompts/init_prompt_en.tmpl")
+PROMPT_TEMPLATE = os.getenv("PROMPT_TEMPLATE", "./prompts/prompt_en.tmpl")
+
+# Initialize Redis client
+redis_client = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, decode_responses=True)
 
 # Initialize LLM and embedding model
 llm = ChatOllama(model="mistral", base_url=OLLAMA_BASE_URL)
@@ -24,33 +61,217 @@ base_prompt = ChatPromptTemplate.from_template(
     "Answer the following question using the provided context.\n\nCONTEXT:\n{context}\n\nQUESTION:\n{question}"
 )
 
+
+# Create Qdrant collection if it doesn't exist
+def create_qdrant_collection():
+    # Connect to Qdrant
+    logger.info("Connecting to Qdrant...")
+    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    
+    logger.info("Checking if collection exists...")
+    # Create collection if it doesn't exist
+    if not client.collection_exists("texts"):
+        logger.info("Creating collection...")
+        client.create_collection(
+            collection_name="texts",
+            vectors_config=VectorParams(
+                size=4096,  # Size of the embedding vector
+                distance=Distance.COSINE,
+            ),
+        )
+
+# Delete conversation from Redis
+async def delete_conversation(session_id: str):
+    await redis_client.delete(session_id)
+
+
 output_parser = StrOutputParser()
 
 # Question input model
 class QuestionInput(BaseModel):
+    session_id: str
     question: str
 
-# Endpoint: first question
+# Conversation input model
+class ConversationInput(BaseModel):
+    session_id: str
+    question: str
+
+# Input model for conversation history
+class SessionInput(BaseModel):
+    session_id: str
+
+
+################################
+# API Endpoints
+################################
+
+
+# Initialize question endpoint
 @app.post("/init-question")
 async def init_question(input: QuestionInput):
-    # Connect to Weaviate
-    client = weaviate.Client(WEAVIATE_URL)
+    session_id = input.session_id
+    question = input.question
+    logger.debug(f"Received question: {question} for session: {session_id}")
 
-    # LangChain retriever
-    vectorstore = Weaviate(
+    create_qdrant_collection()
+
+    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    vectorstore = Qdrant(
         client=client,
-        index_name="texts",      # Make sure this matches your Weaviate class
-        text_key="text",         # The property name in Weaviate
-        embedding=embedding,
+        collection_name="texts",
+        embeddings=embedding,
     )
-    retriever = vectorstore.as_retriever()
+    
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
 
-    # Retrieve context
-    documents = retriever.get_relevant_documents(input.question)
+    documents = retriever.get_relevant_documents(question)
+
+    logger.info(f"Retrieved {len(documents)} documents for session: {session_id} and question: '{question}'")
+
     context = "\n\n".join(doc.page_content for doc in documents)
+    context = context[:4000]
 
-    # Build chain
-    chain: Runnable = base_prompt | llm | output_parser
-    result = chain.invoke({"context": context, "question": input.question})
 
-    return {"response": result}
+    logger.info(f"Loading init prompt from {INIT_PROMPT_TEMPLATE}")
+    with open(INIT_PROMPT_TEMPLATE, "r", encoding="utf-8") as f:
+        init_prompt_template_str = f.read()
+    
+    conversation_prompt = ChatPromptTemplate.from_template(init_prompt_template_str)
+
+    chain: Runnable = conversation_prompt | llm | output_parser
+    answer = chain.invoke({"context": context, "question": question})
+
+    # Redis session management
+    history = [{"question": question, "answer": answer}]
+    await save_conversation(session_id, history)
+
+    return {"response": answer}
+
+
+@app.post("/conversation")
+async def conversation(input: ConversationInput):
+    session_id = input.session_id
+    question = input.question
+
+    # Load conversation history from Redis
+    history = await get_conversation(session_id)
+
+    previous_turns = "\n".join([
+        f"Q: {turn['question']}\nA: {turn['answer']}"
+        for turn in history
+    ])
+
+    # Qdrant retriever
+    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    vectorstore = Qdrant(
+        client=client,
+        collection_name="texts",
+        embeddings=embedding,
+    )
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    documents = retriever.get_relevant_documents(question)
+    logger.debug(f"Retrieved {len(documents)} documents from Qdrant for question: '{question}'")
+
+    context = "\n\n".join(doc.page_content for doc in documents)
+    context = context[:4000]
+
+
+    logger.info(f"Loading conversation prompt from {PROMPT_TEMPLATE}")
+    with open(PROMPT_TEMPLATE, "r", encoding="utf-8") as f:
+        prompt_template_str = f.read()
+    
+    conversation_prompt = ChatPromptTemplate.from_template(prompt_template_str)
+
+    chain: Runnable = conversation_prompt | llm | output_parser
+
+    answer = chain.invoke({
+        "previous": previous_turns,
+        "context": context,
+        "question": question
+    })
+
+    history.append({"question": question, "answer": answer})
+    await save_conversation(session_id, history)
+
+    return {"response": answer}
+
+
+# Endpoint to retrieve conversation history
+@app.get("/history/{session_id}")
+async def get_history(session_id: str):
+    history = await get_conversation(session_id)
+    return {"session_id": session_id, "history": history}
+
+
+# New conversation (delete history)
+@app.post("/new-conversation")
+async def new_conversation(input: SessionInput):
+    await delete_conversation(input.session_id)
+    return {"status": "ok", "message": f"Conversation history cleared for session: {input.session_id}"}
+
+# Reset vector store
+@app.post("/reset-vector-store")
+async def reset_vector_store():
+    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+
+    if client.collection_exists("texts"):
+        client.delete_collection("texts")
+        logger.warning("Qdrant 'texts' collection deleted.")
+
+    create_qdrant_collection()
+    logger.info("Qdrant 'texts' collection recreated.")
+
+    return {"status": "ok", "message": "Vector store has been reset."}
+
+
+# Get sessions
+@app.get("/sessions")
+async def list_sessions():
+    keys = await redis_client.keys("*")
+    return {"sessions": keys}
+
+# Load documents
+@app.post("/load-documents")
+async def load_documents():
+    # Csak .md fájlokat töltünk be
+    documents = []
+    for filename in os.listdir("data"):
+        if filename.endswith(".md"):
+            logger.info(f"Loading document: {filename}")
+            loader = TextLoader(f"data/{filename}")
+            documents.extend(loader.load())
+        elif filename.endswith(".pdf"):
+            logger.info(f"Loading PDF: {filename}")
+            loader = PyPDFLoader(f"data/{filename}")
+            pdf_pages = loader.load()
+            documents.extend(pdf_pages)
+
+    if not documents:
+        return {"status": "no markdown files found"}
+
+    # Text splitter
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=100)
+    split_docs = text_splitter.split_documents(documents)
+
+    # Qdrant collection creation
+    create_qdrant_collection()
+
+    # Upload documents
+    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    vectorstore = Qdrant(
+        client=client,
+        collection_name="texts",
+        embeddings=embedding,
+    )
+    vectorstore.add_documents(split_docs)
+
+    return {
+        "status": "ok",
+        "documents_loaded": len(documents),
+        "chunks_uploaded": len(split_docs),
+        "sample_filename": documents[0].metadata['source'] if documents else "n/a",
+        "sample_content": documents[0].page_content[:200] if documents else "n/a"
+    }
+
+

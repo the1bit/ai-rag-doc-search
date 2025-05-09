@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "rag-api"
 version = "0.1.0"
-description = "Offline RAG API with FastAPI, LangChain, Ollama and Weaviate"
+description = "Offline RAG API with FastAPI, LangChain, Ollama and Qdrant"
 authors = ["Tibor Kiss <tibor.kiss@cloudmentor.hu>"]
 readme = "README.md"
 packages = [{ include = "api" }]
@@ -9,7 +9,7 @@ packages = [{ include = "api" }]
 [tool.poetry.dependencies]
 python = "^3.11"
 
-# API + szerver
+# API + server
 fastapi = "^0.110.0"
 uvicorn = { extras = ["standard"], version = "^0.29.0" }
 
@@ -18,13 +18,19 @@ langchain = "^0.1.16"
 langchain-community = "^0.0.35"
 ollama = "^0.1.6"
 
-# Vector store
-weaviate-client = "^4.5.4"
+# Redis
+redis = "^5.0.4"
 
-# Extra segédcsomagok
+
+# Vector store: Qdrant
+qdrant-client = "^1.8.1"
+
+# Other dependencies
 python-dotenv = "^1.0.1"
 pydantic = "^2.6.4"
-aiohttp = "^3.9.5"  # async HTTP hívásokhoz, ha szükséges
+aiohttp = "^3.9.5"
+pypdf = "^3.15.1"
+
 
 [build-system]
 requires = ["poetry-core"]
