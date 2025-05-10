@@ -74,6 +74,9 @@
     <div id="operations">
 
       <button type="button" onclick="clearChat()" >New conversation</button>
+      <button type="button" onclick="loadDocuments()" >Load documents</button>
+      <button type="button" onclick="resetVectorStore()" >Reset Vector store</button>
+
 
     <script>
       const form = document.getElementById("chatForm");
@@ -129,6 +132,24 @@
         document.getElementById("chatLog").value = "";
         document.getElementById("questionInput").value = "";
       }
+
+      async function loadDocuments() {
+        const response = await fetch(`http://localhost:8900/load-documents`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id }),
+        });
+      }
+
+        async function resetVectorStore() {
+            const response = await fetch(`http://localhost:8900/reset-vector-store`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id }),
+            });
+        }
+
+
     </script>
 
   </body>
