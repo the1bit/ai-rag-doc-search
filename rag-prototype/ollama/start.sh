@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 MODEL_NAME="mistral"
 
 echo "[INFO] Starting Ollama in background..."
@@ -7,7 +9,7 @@ ollama serve &
 OLLAMA_PID=$!
 
 echo "[INFO] Waiting for Ollama API to be ready..."
-until curl -s http://localhost:11434 > /dev/null; do
+until curl -s -o /dev/null -w "%{http_code}" http://localhost:11434 | grep -q "200"; do
   sleep 1
 done
 
@@ -21,5 +23,5 @@ fi
 
 echo "[INFO] Ollama is ready and model '$MODEL_NAME' is loaded."
 
-# Wait for background Ollama process to keep container alive
+# Keep container alive
 wait $OLLAMA_PID
