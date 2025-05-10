@@ -48,6 +48,18 @@ services:
       ollama:
         condition: service_started
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rag-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    networks:
+      - default
+
 volumes:
   qdrant_data:
   ollama_data:

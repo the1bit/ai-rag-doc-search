@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>AI RAG Search</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        max-width: 850px;
+        margin: 2rem auto;
+        padding: 1rem;
+      }
+      textarea {
+        width: 100%;
+        height: 300px;
+        margin-bottom: 1rem;
+        padding: 1rem;
+        font-family: monospace;
+        resize: none;
+        border-radius: 10px;
+        border: none;
+        background-color: #e2e2e23b;
+      }
+
+      input[type="text"] {
+        width: 80%;
+        padding: 0.5rem;
+        border-radius: 5px;
+      }
+      button {
+        padding: 0.5rem 3rem;
+        border-radius: 30px;
+        border: none;
+        background-color: #a2d3fe;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>AI RAG Search</h1>
+    <p>
+      This is a simple AI-powered search interface. Ask your question and get
+      the answer in real-time.
+
+    <textarea
+      id="chatLog"
+      readonly
+      placeholder="Conversation will appear here..."
+    ></textarea>
+    <form id="chatForm">
+      <input
+        type="text"
+        id="questionInput"
+        placeholder="Ask something..."
+        autofocus
+      />
+      <button type="submit">Send</button>
+    </form>
+
+    <div id="questionHint">
+      <p>Hint: You can ask about the organization related documentation and technical details.</p>
+        <p>Example: 
+            <ul>
+            <li>What is the name of the TFLint configuration file?</li>
+            <li>Is there any plugin for TFLint?</li>
+            </ul>
+            </p>
+    </div>
+    <div id="operations">
+
+      <button type="button" onclick="clearChat()" >New conversation</button>
+
+    <script>
+      const form = document.getElementById("chatForm");
+      const input = document.getElementById("questionInput");
+      const log = document.getElementById("chatLog");
+
+      const session_id = "frontend-" + Math.random().toString(36).substring(2);
+      let isFirstQuestion = true;
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const question = input.value.trim();
+        if (!question) return;
+
+        log.value += `\nYou: ${question}\n`;
+        input.value = "";
+
+        const endpoint = isFirstQuestion ? "/init-question" : "/conversation";
+        isFirstQuestion = false;
+
+        const response = await fetch(`http://localhost:8900${endpoint}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id, question }),
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let currentAnswer = "AI: ";
+        log.value += currentAnswer;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          currentAnswer += chunk;
+
+          // Frissítjük az utolsó sorban az AI válaszát
+          const lines = log.value.split("\n");
+          lines[lines.length - 1] = currentAnswer;
+          log.value = lines.join("\n");
+          log.scrollTop = log.scrollHeight;
+        }
+      });
+
+      async function clearChat() {
+        const response = await fetch(`http://localhost:8900/new-conversation`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id }),
+        });
+        document.getElementById("chatLog").value = "";
+        document.getElementById("questionInput").value = "";
+      }
+    </script>
+
+  </body>
+</html>
