@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_community.chat_models import ChatOllama
 from langchain.prompts import ChatPromptTemplate
@@ -38,8 +39,72 @@ async def save_conversation(session_id: str, history: List[Dict[str, str]]):
     await redis_client.set(session_id, json.dumps(history))
 
 
+async def stream_answer(chain: Runnable, variables: dict):
+    async for chunk in chain.astream(variables):
+        yield chunk.content
+
+# Async generator to stream and collect the full response
+async def stream_and_store_answer(chain: Runnable, variables: dict, session_id: str, question: str):
+    full_answer = ""
+
+    async for chunk in chain.astream(variables):
+        content = chunk  
+        full_answer += content
+        yield content
+
+    # Save to Redis after the full response is streamed
+    try:
+        history = [{"question": question, "answer": full_answer}]
+        await save_conversation(session_id, history)
+    except Exception as e:
+        logger.error(f"Failed to save conversation for session {session_id}: {e}")
 
 
+# Async generator to stream and save conversation response
+async def stream_and_store_conversation_answer(
+    chain: Runnable,
+    variables: dict,
+    session_id: str,
+    question: str
+):
+    full_answer = ""
+    async for chunk in chain.astream(variables):
+        content = chunk.content
+        full_answer += content
+        yield content
+
+    try:
+        history = await get_conversation(session_id)
+        history.append({"question": question, "answer": full_answer})
+        await save_conversation(session_id, history)
+    except Exception as e:
+        logger.error(f"Failed to save conversation for session {session_id}: {e}")
+
+
+async def stream_json_response(chain: Runnable, variables: dict, session_id: str, question: str):
+    full_answer = ""
+    yield '{"response":"'
+
+    try:
+        async for chunk in chain.astream(variables):
+            content = chunk.replace('"', '\\"').replace("\n", "\\n")
+            full_answer += content
+            logger.debug(f"Streaming chunk: {repr(content)}")
+            yield content
+    except Exception as e:
+        logger.error(f"Streaming error: {e}")
+    finally:
+        yield '"}'  # mindig zárjuk le a JSON választ
+
+        try:
+            history = await get_conversation(session_id)
+            history.append({"question": question, "answer": full_answer})
+            await save_conversation(session_id, history)
+        except Exception as e:
+            logger.error(f"Failed to save conversation: {e}")
+
+
+# Initialize FastAPI app
 app = FastAPI()
 
 # Environment variables
@@ -53,7 +118,11 @@ PROMPT_TEMPLATE = os.getenv("PROMPT_TEMPLATE", "./prompts/prompt_en.tmpl")
 redis_client = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, decode_responses=True)
 
 # Initialize LLM and embedding model
-llm = ChatOllama(model="mistral", base_url=OLLAMA_BASE_URL)
+llm = ChatOllama(
+    model="mistral", 
+    base_url=OLLAMA_BASE_URL,
+    streaming=True
+    )
 embedding = OllamaEmbeddings(model="mistral", base_url=OLLAMA_BASE_URL)
 
 # Prompt template
@@ -107,7 +176,8 @@ class SessionInput(BaseModel):
 ################################
 
 
-# Initialize question endpoint
+
+# Initialize question endpoint with streaming
 @app.post("/init-question")
 async def init_question(input: QuestionInput):
     session_id = input.session_id
@@ -122,9 +192,7 @@ async def init_question(input: QuestionInput):
         collection_name="texts",
         embeddings=embedding,
     )
-    
     retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
-
     documents = retriever.get_relevant_documents(question)
 
     logger.info(f"Retrieved {len(documents)} documents for session: {session_id} and question: '{question}'")
@@ -132,23 +200,20 @@ async def init_question(input: QuestionInput):
     context = "\n\n".join(doc.page_content for doc in documents)
     context = context[:4000]
 
-
     logger.info(f"Loading init prompt from {INIT_PROMPT_TEMPLATE}")
     with open(INIT_PROMPT_TEMPLATE, "r", encoding="utf-8") as f:
         init_prompt_template_str = f.read()
-    
+
     conversation_prompt = ChatPromptTemplate.from_template(init_prompt_template_str)
-
     chain: Runnable = conversation_prompt | llm | output_parser
-    answer = chain.invoke({"context": context, "question": question})
 
-    # Redis session management
-    history = [{"question": question, "answer": answer}]
-    await save_conversation(session_id, history)
-
-    return {"response": answer}
+    return StreamingResponse(
+        stream_and_store_answer(chain, {"context": context, "question": question}, session_id, question),
+        media_type="text/plain"
+    )
 
 
+# Endpoint for conversation
 @app.post("/conversation")
 async def conversation(input: ConversationInput):
     session_id = input.session_id
@@ -156,7 +221,6 @@ async def conversation(input: ConversationInput):
 
     # Load conversation history from Redis
     history = await get_conversation(session_id)
-
     previous_turns = "\n".join([
         f"Q: {turn['question']}\nA: {turn['answer']}"
         for turn in history
@@ -176,25 +240,23 @@ async def conversation(input: ConversationInput):
     context = "\n\n".join(doc.page_content for doc in documents)
     context = context[:4000]
 
-
     logger.info(f"Loading conversation prompt from {PROMPT_TEMPLATE}")
     with open(PROMPT_TEMPLATE, "r", encoding="utf-8") as f:
         prompt_template_str = f.read()
-    
-    conversation_prompt = ChatPromptTemplate.from_template(prompt_template_str)
 
+    conversation_prompt = ChatPromptTemplate.from_template(prompt_template_str)
     chain: Runnable = conversation_prompt | llm | output_parser
 
-    answer = chain.invoke({
-        "previous": previous_turns,
-        "context": context,
-        "question": question
-    })
+    return StreamingResponse(
+    stream_json_response(
+        chain,
+        {"previous": previous_turns, "context": context, "question": question},
+        session_id,
+        question
+    ),
+    media_type="application/json"
+)
 
-    history.append({"question": question, "answer": answer})
-    await save_conversation(session_id, history)
-
-    return {"response": answer}
 
 
 # Endpoint to retrieve conversation history
