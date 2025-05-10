@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_community.chat_models import ChatOllama
 from langchain.prompts import ChatPromptTemplate
@@ -107,6 +108,15 @@ async def stream_json_response(chain: Runnable, variables: dict, session_id: str
 # Initialize FastAPI app
 app = FastAPI()
 
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080"],  # vagy ["*"] fejlesztéshez
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Environment variables
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
@@ -213,7 +223,7 @@ async def init_question(input: QuestionInput):
     )
 
 
-# Endpoint for conversation
+# Endpoint for conversation with text/plain stream
 @app.post("/conversation")
 async def conversation(input: ConversationInput):
     session_id = input.session_id
@@ -248,15 +258,14 @@ async def conversation(input: ConversationInput):
     chain: Runnable = conversation_prompt | llm | output_parser
 
     return StreamingResponse(
-    stream_json_response(
-        chain,
-        {"previous": previous_turns, "context": context, "question": question},
-        session_id,
-        question
-    ),
-    media_type="application/json"
-)
-
+        stream_and_store_answer(
+            chain,
+            {"previous": previous_turns, "context": context, "question": question},
+            session_id,
+            question
+        ),
+        media_type="text/plain"
+    )
 
 
 # Endpoint to retrieve conversation history
