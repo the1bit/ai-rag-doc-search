@@ -1,5 +1,4 @@
-version: "3.9"
-
+# Docker Compose file for the RAG prototype
 services:
   qdrant:
     image: qdrant/qdrant
