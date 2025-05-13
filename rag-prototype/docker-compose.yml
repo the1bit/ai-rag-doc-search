@@ -1,0 +1,65 @@
+# Docker Compose file for the RAG prototype
+services:
+  qdrant:
+    image: qdrant/qdrant
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  ollama:
+    build:
+      context: ./ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+    container_name: rag-api
+    ports:
+      - "8900:8000"
+    volumes:
+      - ./data:/app/data
+      - ./prompts:/app/prompts
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - REDIS_HOST=redis
+      - INIT_PROMPT_TEMPLATE=./prompts/init_prompt_en.tmpl
+      - PROMPT_TEMPLATE=./prompts/prompt_en.tmpl
+    depends_on:
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rag-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    networks:
+      - default
+
+volumes:
+  qdrant_data:
+  ollama_data:
