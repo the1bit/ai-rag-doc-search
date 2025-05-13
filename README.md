@@ -1,6 +1,8 @@
 # ai-rag-doc-search
 Document search with RAG
 
+![LLM-RAG-DOCS Components](images/LLM-RAG-DOCS-Components.png)
+
 
 # API
 
