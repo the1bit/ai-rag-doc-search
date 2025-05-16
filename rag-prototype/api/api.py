@@ -64,7 +64,7 @@ async def stream_and_store_answer(
             content = str(chunk)  # Fallback (optional, safety net)
 
         full_answer += content
-        yield content  # ✅ Yield only the token delta
+        yield content  # Yield only the token delta
 
     # After streaming completes, store in Redis
     try:
@@ -108,7 +108,7 @@ async def stream_json_response(
     except Exception as e:
         logger.error(f"Streaming error: {e}")
     finally:
-        yield '"}'  # mindig zárjuk le a JSON választ
+        yield '"}'  # Always close the JSON response
 
         try:
             history = await get_conversation(session_id)
